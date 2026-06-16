@@ -74,6 +74,14 @@ st.markdown("""
 
 DARK = dict(template="streamlit")
 COLORS = ["#6366f1", "#06b6d4", "#34d399", "#f59e0b", "#f43f5e", "#a78bfa"]
+REQUIRED_COLUMNS = {
+    "week", "channel", "visitors", "product_views", "add_to_cart",
+    "checkout_starts", "purchases", "revenue", "ad_spend",
+}
+NUMERIC_COLUMNS = [
+    "visitors", "product_views", "add_to_cart", "checkout_starts",
+    "purchases", "revenue", "ad_spend",
+]
 
 # ── Sample data: 8-week e-commerce story ──────────────────────────────────────
 # Story arc:
@@ -136,6 +144,30 @@ def compute_funnel_rates(df: pd.DataFrame) -> pd.DataFrame:
     df["aov"]           = df["revenue"]          / df["purchases"].replace(0, np.nan)
     df["roas"]          = np.where(df["ad_spend"] > 0, df["revenue"] / df["ad_spend"], np.nan)
     return df
+
+
+def validate_input(df: pd.DataFrame) -> list[str]:
+    """Return user-facing validation errors before any analysis runs."""
+    errors = []
+    missing = sorted(REQUIRED_COLUMNS - set(df.columns))
+    if missing:
+        errors.append("Missing columns: " + ", ".join(missing))
+
+    present_numeric = [col for col in NUMERIC_COLUMNS if col in df.columns]
+    for col in present_numeric:
+        converted = pd.to_numeric(df[col], errors="coerce")
+        if converted.isna().any():
+            bad_count = int(converted.isna().sum())
+            errors.append(f"{col} has {bad_count} non-numeric value(s)")
+        elif (converted < 0).any():
+            errors.append(f"{col} contains negative values")
+
+    if "week" in df.columns:
+        parsed = pd.to_datetime(df["week"], errors="coerce")
+        if parsed.isna().any():
+            errors.append("week must be parseable as a date")
+
+    return errors
 
 
 def generate_story_opener(df: pd.DataFrame) -> dict:
@@ -210,8 +242,8 @@ def find_biggest_funnel_leak(df: pd.DataFrame) -> dict:
 
 def budget_reallocation(df: pd.DataFrame) -> list[dict]:
     """
-    Suggest moving budget from low-ROAS to high-ROAS channels.
-    Move = 30% of underperformer's weekly spend, capped at $1k/week.
+    Suggest cautious budget tests from low-ROAS to high-ROAS channels.
+    Gains are scenario estimates, not guaranteed forecasts.
     """
     paid = df[df["ad_spend"] > 0].groupby("channel").agg(
         revenue=("revenue", "sum"), spend=("ad_spend", "sum")
@@ -226,15 +258,25 @@ def budget_reallocation(df: pd.DataFrame) -> list[dict]:
     suggestions = []
     for _, src in underperformers.iterrows():
         for _, dst in overperformers.iterrows():
-            weekly_move = min(src["spend"] / n_weeks * 0.30, 1000)
-            est_rev_gain = weekly_move * (dst["roas"] - src["roas"])
+            src_weekly_spend = src["spend"] / n_weeks
+            dst_weekly_spend = dst["spend"] / n_weeks
+            weekly_move = min(src_weekly_spend * 0.20, max(dst_weekly_spend * 0.50, 250), 1000)
+            marginal_roas = min(dst["roas"] * 0.35, dst["roas"] - src["roas"])
+            conservative_gain = weekly_move * max(marginal_roas * 0.50, 0)
+            base_gain = weekly_move * max(marginal_roas * 0.75, 0)
+            upside_gain = weekly_move * max(marginal_roas, 0)
+            confidence = "Medium" if dst["spend"] > 0 and src["spend"] > dst["spend"] else "Low"
             suggestions.append({
                 "from":            src["channel"],
                 "from_roas":       round(float(src["roas"]), 1),
                 "to":              dst["channel"],
                 "to_roas":         round(float(dst["roas"]), 1),
                 "weekly_move":     round(weekly_move),
-                "est_weekly_gain": round(est_rev_gain),
+                "gain_low":        round(conservative_gain),
+                "gain_base":       round(base_gain),
+                "gain_high":       round(upside_gain),
+                "confidence":      confidence,
+                "assumption":      "Assumes destination channel can absorb incremental spend without full-period ROAS holding constant.",
             })
 
     return suggestions[:3]
@@ -289,7 +331,10 @@ One sentence. The single most important thing in this data. Make it concrete: na
 Three actions, each on its own line. Format: [Action] → [Expected outcome with a metric].
 Actions must be specific enough to assign to someone. No "consider" or "explore."
 
-Rules: use actual numbers from the data. Write in present tense. Sound like someone who has done this before."""
+**Assumptions & Checks**
+Two bullets. Separate observed facts from model assumptions. Name what the team should verify before scaling spend.
+
+Rules: use actual numbers from the data. Do not claim causality unless the summary supports it. Treat budget_opportunities as scenario estimates, not guaranteed revenue. Write in present tense. Sound like someone who has done this before."""
 
     resp = client.chat.completions.create(
         model="deepseek-chat",
@@ -348,9 +393,10 @@ def plot_revenue_trend(df):
 def plot_roas_trend(df):
     """ROAS trend per paid channel over weeks."""
     paid = df[df["ad_spend"] > 0].copy()
-    paid_trend = paid.groupby(["week", "channel"]).apply(
-        lambda x: x["revenue"].sum() / x["ad_spend"].sum()
-    ).reset_index(name="roas")
+    paid_trend = paid.groupby(["week", "channel"], as_index=False).agg(
+        revenue=("revenue", "sum"), ad_spend=("ad_spend", "sum")
+    )
+    paid_trend["roas"] = paid_trend["revenue"] / paid_trend["ad_spend"]
     fig = px.line(paid_trend, x="week", y="roas", color="channel",
                   title="ROAS Trend by Channel", markers=True,
                   color_discrete_sequence=COLORS)
@@ -405,7 +451,7 @@ with st.sidebar:
             "2-hour analyst deep-dive → 2-minute self-serve report."
         )
     st.divider()
-    if st.button(t("Reset", "重置"), use_container_width=True):
+    if st.button(t("Reset", "重置"), width="stretch"):
         for key in ["funnel_sample", "funnel_narrative"]:
             st.session_state.pop(key, None)
         st.rerun()
@@ -459,16 +505,19 @@ st.download_button(t("⬇ Download sample CSV","⬇ 下载示例 CSV"), SAMPLE_C
 
 # ── Analysis ───────────────────────────────────────────────────────────────────
 if df is not None:
-    required = {"week", "channel", "visitors", "purchases", "revenue", "ad_spend"}
-    missing = required - set(df.columns)
-    if missing:
-        st.error(f"{t('Missing columns:','缺少列：')} {missing}")
+    validation_errors = validate_input(df)
+    if validation_errors:
+        st.error(t("The uploaded CSV needs a quick fix before analysis:", "上传的 CSV 需要先修正以下问题："))
+        for err in validation_errors:
+            st.markdown(f"- {err}")
         st.stop()
 
+    df["week"] = pd.to_datetime(df["week"]).dt.strftime("%Y-%m-%d")
+    df[NUMERIC_COLUMNS] = df[NUMERIC_COLUMNS].apply(pd.to_numeric)
     df = compute_funnel_rates(df)
 
     with st.expander(t("Preview data","数据预览")):
-        st.dataframe(df.head(12), use_container_width=True)
+        st.dataframe(df.head(12), width="stretch")
 
     # ── Story opener ───────────────────────────────────────────────────────────
     story = generate_story_opener(df)
@@ -502,6 +551,24 @@ if df is not None:
             </div>""",
             unsafe_allow_html=True,
         )
+
+    with st.expander(t("Agent run trace: what is deterministic vs AI-generated", "Agent 运行轨迹：哪些是确定性计算，哪些由 AI 生成")):
+        st.markdown(t(
+            """
+1. **Validate data contract** — required columns, dates, and non-negative numeric fields.
+2. **Compute metrics deterministically** — funnel rates, ROAS, AOV, CVR, channel trends.
+3. **Detect anomalies with rules** — WoW drops, ROAS floors, channel collapses.
+4. **Simulate budget tests** — cautious scenario ranges with explicit marginal-ROAS assumptions.
+5. **Generate narrative with AI** — the model only receives the structured summary above and must separate facts from assumptions.
+            """,
+            """
+1. **校验数据契约** — 必需字段、日期、非负数值字段。
+2. **确定性计算指标** — 漏斗转化率、ROAS、AOV、CVR、渠道趋势。
+3. **规则检测异常** — 环比下滑、ROAS 阈值、渠道流量崩溃。
+4. **模拟预算测试** — 用谨慎情景区间表达，并显式展示边际 ROAS 假设。
+5. **AI 生成叙述** — 模型只接收上方结构化摘要，并被要求区分事实与假设。
+            """
+        ))
 
     # ── Step 2: KPIs ──────────────────────────────────────────────────────────
     st.divider()
@@ -615,7 +682,7 @@ if df is not None:
     }
     st.dataframe(
         ch_summary[display_cols].rename(columns=col_rename),
-        use_container_width=True,
+        width="stretch",
     )
 
     # Budget reallocation callout
@@ -623,10 +690,13 @@ if df is not None:
     if reallocations:
         lines = "".join([
             f"<div style='margin-bottom:0.4rem;color:#e2e8f0;font-size:0.92rem'>"
-            f"{t('Move','将')} <b>${r['weekly_move']:,}/{t('week','周')}</b> {t('from','从')} "
+            f"{t('Test moving','测试转移')} <b>${r['weekly_move']:,}/{t('week','周')}</b> {t('from','从')} "
             f"<b style='color:#f43f5e'>{r['from']}</b> ({r['from_roas']}x ROAS) → "
             f"<b style='color:#34d399'>{r['to']}</b> ({r['to_roas']}x ROAS) "
-            f"<span style='color:#94a3b8'>≈ +${r['est_weekly_gain']:,}/{t('week','周')} {t('in revenue','额外收入')}</span>"
+            f"<span style='color:#94a3b8'>"
+            f"{t('scenario range','情景区间')}: +${r['gain_low']:,}–${r['gain_high']:,}/{t('week','周')} "
+            f"({t('base','基准')} +${r['gain_base']:,}, {t('confidence','置信度')} {r['confidence']})"
+            f"</span>"
             f"</div>"
             for r in reallocations
         ])
@@ -634,6 +704,10 @@ if df is not None:
             f"""<div class="realloc-box">
             <span style="color:#34d399;font-weight:700;font-size:0.8rem">💡 {t("BUDGET REALLOCATION OPPORTUNITIES","预算重新分配机会")}</span><br><br>
             {lines}
+            <div style="color:#94a3b8;font-size:0.82rem;line-height:1.6;margin-top:0.8rem">
+            {t("Guardrail: these are test-budget scenarios, not guaranteed forecasts. Scale only after validating audience capacity, frequency caps, and marginal ROAS.",
+               "边界条件：这些是测试预算情景，不是确定性预测。只有在验证受众容量、频控和边际 ROAS 后再扩大投放。")}
+            </div>
             </div>""",
             unsafe_allow_html=True,
         )
@@ -662,9 +736,11 @@ if df is not None:
 
         # ROAS trend per paid channel
         paid_df = df[df["ad_spend"] > 0].copy()
-        roas_trend = paid_df.groupby(["week", "channel"]).apply(
-            lambda x: round(x["revenue"].sum() / x["ad_spend"].sum(), 1)
-        ).unstack(fill_value=None)
+        roas_trend = paid_df.groupby(["week", "channel"], as_index=False).agg(
+            revenue=("revenue", "sum"), ad_spend=("ad_spend", "sum")
+        )
+        roas_trend["roas"] = (roas_trend["revenue"] / roas_trend["ad_spend"]).round(1)
+        roas_trend = roas_trend.pivot(index="week", columns="channel", values="roas")
         roas_trend_dict = {col: roas_trend[col].tolist() for col in roas_trend.columns}
 
         ch_records = [
@@ -693,6 +769,11 @@ if df is not None:
                 "drop_pct": round(leak["drop_pct"] * 100, 1),
             },
             "budget_opportunities": reallocations,
+            "output_contract": {
+                "facts_from_code": "All metrics, anomalies, funnel leaks, and scenario ranges are computed before the LLM call.",
+                "llm_role": "Turn structured facts into an executive narrative and keep assumptions explicit.",
+                "guardrail": "Budget gains are scenario estimates; do not present them as guaranteed revenue.",
+            },
         }
 
         with st.spinner(t("Analyzing your funnel…","正在分析漏斗数据…")):

@@ -1,10 +1,10 @@
 # Growth & Funnel Insights Agent
 
-Multi-channel funnel analysis with automated anomaly detection and AI-generated growth recommendations.
+Multi-channel funnel analysis with automated anomaly detection, cautious budget simulations, and AI-generated growth recommendations.
 
 ## Overview
 
-Takes weekly funnel data across channels, computes conversion rates and ROAS at each stage, flags anomalies automatically, and generates a structured growth report with specific next-step recommendations.
+Takes weekly funnel data across channels, validates the input contract, computes conversion rates and ROAS at each stage, flags anomalies automatically, simulates budget test scenarios, and generates a structured growth report with specific next-step recommendations.
 
 ## Features
 
@@ -12,7 +12,9 @@ Takes weekly funnel data across channels, computes conversion rates and ROAS at 
 - **Channel breakdown** — CVR, AOV, and ROAS by channel in a single view
 - **WoW trend analysis** — revenue, visitor, and conversion rate trends over time
 - **Anomaly detection** — rule-based flags for week-over-week drops > 15%, ROAS below threshold, and declining channel trends
-- **AI growth report** — structured output: headline finding, what's working, what needs attention, 3 recommended actions
+- **Budget scenario simulation** — cautious test-budget ranges with confidence labels and explicit marginal-ROAS assumptions
+- **Agent run trace** — shows which steps are deterministic and which step uses the LLM
+- **AI growth report** — structured output: headline finding, data story, 3 recommended actions, and assumptions/checks
 
 ## Input format
 
@@ -30,7 +32,7 @@ CSV with the following columns:
 | `revenue` | Gross revenue |
 | `ad_spend` | Paid spend (0 for organic channels) |
 
-A built-in sample dataset (4 channels × 5 weeks) is included.
+A built-in sample dataset (4 channels × 8 weeks) is included.
 
 ## Stack
 
