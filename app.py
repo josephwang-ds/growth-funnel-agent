@@ -180,9 +180,10 @@ def generate_story_opener(df: pd.DataFrame) -> dict:
     last_rev  = df[df["week"] == weeks[-1]]["revenue"].sum()
     rev_change = (last_rev - first_rev) / first_rev
 
-    # Channel ROAS: first 2 weeks vs last 2 weeks
+    # Channel ROAS: first 2 weeks vs most recent 2 weeks.
     early = df[df["week"].isin(weeks[:2])]
     late  = df[df["week"].isin(weeks[-2:])]
+    recent_window_weeks = min(2, len(weeks))
 
     def ch_roas(d):
         paid = d[d["ad_spend"] > 0].groupby("channel").agg(
@@ -209,19 +210,27 @@ def generate_story_opener(df: pd.DataFrame) -> dict:
     late_ch["score"] = late_ch["roas"].rank() - late_ch["spend_share"].rank()
     hero_row  = late_ch.loc[late_ch["score"].idxmax()]
     hero_ch   = hero_row["channel"]
-    hero_roas = float(hero_row["roas"])
+    hero_recent_roas = float(hero_row["roas"])
     hero_spend_share = float(hero_row["spend_share"])
+
+    period_paid = df[df["ad_spend"] > 0].groupby("channel").agg(
+        rev=("revenue", "sum"), spend=("ad_spend", "sum")
+    )
+    period_paid["roas"] = period_paid["rev"] / period_paid["spend"]
+    hero_period_roas = float(period_paid.loc[hero_ch, "roas"]) if hero_ch in period_paid.index else None
 
     return {
         "rev_change":          rev_change,
         "first_rev":           first_rev,
         "last_rev":            last_rev,
         "weeks":               len(weeks),
+        "recent_window_weeks":  recent_window_weeks,
         "biggest_decliner":    biggest_decliner,
         "decliner_early_roas": decliner_early_roas,
         "decliner_late_roas":  decliner_late_roas,
         "hero_channel":        hero_ch,
-        "hero_roas":           hero_roas,
+        "hero_recent_roas":    hero_recent_roas,
+        "hero_period_roas":    hero_period_roas,
         "hero_spend_share_pct": hero_spend_share * 100,
     }
 
@@ -525,17 +534,28 @@ if df is not None:
         rev_sign  = "+" if story["rev_change"] >= 0 else ""
         rev_color = "#34d399" if story["rev_change"] >= 0 else "#f43f5e"
         hero      = story["hero_channel"]
-        hero_roas = story["hero_roas"]
+        hero_recent_roas = story["hero_recent_roas"]
+        hero_period_roas = story["hero_period_roas"]
         hero_shr  = story["hero_spend_share_pct"]
         decliner  = story["biggest_decliner"]
         d_early   = story["decliner_early_roas"]
         d_late    = story["decliner_late_roas"]
+        period_label = t(f"{story['weeks']}-Week", f"{story['weeks']} 周")
+        recent_label = t(
+            f"Recent {story['recent_window_weeks']}-Week",
+            f"最近 {story['recent_window_weeks']} 周"
+        )
         _decliner_note = (
-            f" <b style='color:#f43f5e'>{decliner}</b> {t('ROAS eroded from','ROAS 从')} <b>{d_early:.1f}x → {d_late:.1f}x</b> {t('as spend scaled — diminishing returns in play.','随投放放量而衰减——边际收益递减。')}"
+            f" <b style='color:#f43f5e'>{decliner}</b> {t('ROAS eroded from','ROAS 从')} <b>{d_early:.1f}x → {d_late:.1f}x</b> "
+            f"<span style='color:#94a3b8'>({t('early 2-week vs recent 2-week','前 2 周 vs 最近 2 周')})</span> "
+            f"{t('as spend scaled — diminishing returns in play.','随投放放量而衰减——边际收益递减。')}"
             if decliner else ""
         )
         _hero_note = (
-            f" {t('Meanwhile','与此同时')} <b style='color:#34d399'>{hero}</b> {t('is sitting at','的 ROAS 达')} <b>{hero_roas:.0f}x ROAS</b> {t('with only','仅占')} <b>{hero_shr:.0f}%</b> {t('of paid budget — the most underinvested channel in the mix.','付费预算——是组合中投入最少的高效渠道。')}"
+            f" {t('Meanwhile','与此同时')} <b style='color:#34d399'>{hero}</b> "
+            f"{t('shows','显示')} <b>{recent_label} ROAS: {hero_recent_roas:.0f}x</b> "
+            f"<span style='color:#94a3b8'>({period_label} {t('Aggregate ROAS','累计 ROAS')}: {hero_period_roas:.1f}x)</span> "
+            f"{t('with only','仅占')} <b>{hero_shr:.0f}%</b> {t('of recent paid budget — the most underinvested channel in the mix.','最近付费预算——是组合中投入最少的高效渠道。')}"
             if hero else ""
         )
         st.markdown(
@@ -580,13 +600,14 @@ if df is not None:
     overall_cvr  = total_pur / total_vis
     total_spend  = df["ad_spend"].sum()
     blended_roas = total_rev / total_spend if total_spend > 0 else 0
+    period_label = t(f"{df['week'].nunique()}-Week", f"{df['week'].nunique()} 周")
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric(t("Total Revenue","总收入"),   f"${total_rev:,.0f}")
     m2.metric(t("Total Visitors","总访客数"),  f"{total_vis:,}")
     m3.metric(t("Total Purchases","总购买数"), f"{total_pur:,}")
     m4.metric(t("Overall CVR","整体转化率"),     f"{overall_cvr:.2%}")
-    m5.metric(t("Blended ROAS","综合 ROAS"),    f"{blended_roas:.1f}x")
+    m5.metric(t(f"{period_label} Blended ROAS", f"{period_label} 综合 ROAS"),    f"{blended_roas:.1f}x")
 
     # ── Step 3: Charts ─────────────────────────────────────────────────────────
     st.divider()
@@ -678,7 +699,7 @@ if df is not None:
         "cvr_%": t("cvr_%","转化率_%"),
         "aov": t("aov","客单价"),
         "ad_spend": t("ad_spend","广告花费"),
-        "roas": "roas",
+        "roas": t(f"{period_label} Aggregate ROAS", f"{period_label} 累计 ROAS"),
     }
     st.dataframe(
         ch_summary[display_cols].rename(columns=col_rename),
@@ -691,8 +712,8 @@ if df is not None:
         lines = "".join([
             f"<div style='margin-bottom:0.4rem;color:#e2e8f0;font-size:0.92rem'>"
             f"{t('Test moving','测试转移')} <b>${r['weekly_move']:,}/{t('week','周')}</b> {t('from','从')} "
-            f"<b style='color:#f43f5e'>{r['from']}</b> ({r['from_roas']}x ROAS) → "
-            f"<b style='color:#34d399'>{r['to']}</b> ({r['to_roas']}x ROAS) "
+            f"<b style='color:#f43f5e'>{r['from']}</b> ({period_label} {t('Aggregate ROAS','累计 ROAS')} {r['from_roas']}x) → "
+            f"<b style='color:#34d399'>{r['to']}</b> ({period_label} {t('Aggregate ROAS','累计 ROAS')} {r['to_roas']}x) "
             f"<span style='color:#94a3b8'>"
             f"{t('scenario range','情景区间')}: +${r['gain_low']:,}–${r['gain_high']:,}/{t('week','周')} "
             f"({t('base','基准')} +${r['gain_base']:,}, {t('confidence','置信度')} {r['confidence']})"
@@ -728,7 +749,7 @@ if df is not None:
             revenue=("revenue", "sum"), ad_spend=("ad_spend", "sum"),
         ).reset_index()
         ch_data["cvr_pct"] = (ch_data["purchases"] / ch_data["visitors"] * 100).round(2)
-        ch_data["roas"]    = (ch_data["revenue"] / ch_data["ad_spend"].replace(0, np.nan)).round(1)
+        ch_data["period_aggregate_roas"] = (ch_data["revenue"] / ch_data["ad_spend"].replace(0, np.nan)).round(1)
 
         # WoW revenue trend per channel
         trend = df.groupby(["week", "channel"])["revenue"].sum().unstack(fill_value=0)
@@ -763,6 +784,10 @@ if df is not None:
             "by_channel":         ch_records,
             "revenue_trend_by_channel": trend_dict,
             "roas_trend_by_channel": roas_trend_dict,
+            "roas_window_note": {
+                "channel_table_roas": f"{df['week'].nunique()}-week aggregate ROAS",
+                "story_opener_recent_roas": "Most recent 2-week aggregate ROAS",
+            },
             "anomalies":          flags,
             "funnel_leak":        {
                 "step":     leak["step"],
